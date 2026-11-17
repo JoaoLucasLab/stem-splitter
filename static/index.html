@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stem Splitter</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#1d2330; --muted:#6b7280; --accent:#4f46e5; --border:#e5e7eb; --ok:#059669; --err:#dc2626; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#111318; --card:#1a1d24; --text:#e8eaf0; --muted:#9aa1ad; --accent:#818cf8; --border:#2b2f38; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:var(--bg); color:var(--text); }
+  main { max-width:640px; margin:40px auto; padding:0 16px; }
+  h1 { font-size:1.6rem; margin:0 0 4px; }
+  .sub { color:var(--muted); margin:0 0 24px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:20px; margin-bottom:16px; }
+  #drop { border:2px dashed var(--border); border-radius:10px; padding:32px 16px; text-align:center; cursor:pointer; transition:.15s; }
+  #drop.over, #drop:hover { border-color:var(--accent); }
+  #drop strong { color:var(--accent); }
+  #fileName { margin-top:10px; font-weight:600; word-break:break-all; }
+  button, .btn { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:10px 18px; font-size:1rem; cursor:pointer; text-decoration:none; display:inline-block; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  .row { display:flex; gap:10px; align-items:center; margin-top:16px; flex-wrap:wrap; }
+  .muted { color:var(--muted); font-size:.9rem; }
+  .steps { list-style:none; padding:0; margin:0; }
+  .steps li { padding:6px 0; color:var(--muted); }
+  .steps li.active { color:var(--text); font-weight:600; }
+  .steps li.active::before { content:"⏳ "; }
+  .steps li.done { color:var(--ok); }
+  .steps li.done::before { content:"✓ "; }
+  .steps li:not(.active):not(.done)::before { content:"○ "; }
+  .error { color:var(--err); font-weight:600; }
+  .stem { display:grid; grid-template-columns:100px 1fr auto; gap:10px; align-items:center; padding:8px 0; border-top:1px solid var(--border); }
+  .stem:first-child { border-top:0; }
+  .stem span { font-weight:600; text-transform:capitalize; }
+  .stem audio { width:100%; height:36px; }
+  .stem a { color:var(--accent); font-size:.9rem; }
+  @media (max-width:480px) { .stem { grid-template-columns:1fr auto; } .stem audio { grid-column:1 / -1; } }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Stem Splitter</h1>
+  <p class="sub">Choose a song to split it into vocals, drums, bass, guitar, piano and more.</p>
+
+  <div class="card">
+    <div id="drop">
+      <div><strong>Choose a song</strong> or drag it here</div>
+      <div class="muted">MP3, WAV, FLAC, M4A, OGG, AIFF · up to 200 MB</div>
+      <div id="fileName"></div>
+    </div>
+    <input type="file" id="file" accept=".mp3,.wav,.flac,.m4a,.aac,.ogg,.aiff,.aif,.opus,audio/*" hidden>
+    <div class="row">
+      <button id="go" disabled>Split song</button>
+      <span id="health" class="muted"></span>
+    </div>
+  </div>
+
+  <div class="card hidden" id="progressCard">
+    <ul class="steps" id="steps">
+      <li data-s="uploading">Uploading</li>
+      <li data-s="queued">Waiting in line</li>
+      <li data-s="separating_vocals">Separating vocals</li>
+      <li data-s="separating_instruments">Separating instruments</li>
+      <li data-s="packaging">Packaging</li>
+    </ul>
+    <p class="muted" id="elapsed"></p>
+    <p class="error" id="error"></p>
+  </div>
+
+  <div class="card hidden" id="resultCard">
+    <div id="stems"></div>
+    <div class="row">
+      <a class="btn" id="zip" href="#">Download all (zip)</a>
+      <button id="again" style="background:transparent;color:var(--accent);border:1px solid var(--accent)">Split another song</button>
+    </div>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const ORDER = ["uploading","queued","separating_vocals","separating_instruments","packaging","done"];
+let file = null, timer = null, startedAt = 0, modelsReady = false;
+
+function pick(f) {
+  if (!f) return;
+  file = f;
+  $("fileName").textContent = f.name;
+  updateButton();
+}
+function updateButton() { $("go").disabled = !(file && modelsReady); }
+
+$("drop").onclick = () => $("file").click();
+$("file").onchange = e => pick(e.target.files[0]);
+["dragenter","dragover"].forEach(ev => $("drop").addEventListener(ev, e => { e.preventDefault(); $("drop").classList.add("over"); }));
+["dragleave","drop"].forEach(ev => $("drop").addEventListener(ev, e => { e.preventDefault(); $("drop").classList.remove("over"); }));
+$("drop").addEventListener("drop", e => pick(e.dataTransfer.files[0]));
+
+async function checkHealth() {
+  try {
+    const h = await (await fetch("/health")).json();
+    if (h.model_error) { $("health").textContent = "Model error: " + h.model_error; $("health").className = "error"; return; }
+    modelsReady = h.models_loaded;
+    $("health").textContent = modelsReady ? `Ready · running on ${h.device.toUpperCase()}` : "Loading models (first start downloads ~1 GB)…";
+    updateButton();
+    if (!modelsReady) setTimeout(checkHealth, 3000);
+  } catch { $("health").textContent = "Server not reachable"; setTimeout(checkHealth, 3000); }
+}
+
+function showStage(stage) {
+  const i = ORDER.indexOf(stage);
+  document.querySelectorAll("#steps li").forEach(li => {
+    const j = ORDER.indexOf(li.dataset.s);
+    li.className = j < i ? "done" : j === i ? "active" : "";
+  });
+}
+
+function tick() {
+  const s = Math.round((Date.now() - startedAt) / 1000);
+  $("elapsed").textContent = `Elapsed: ${Math.floor(s/60)}:${String(s%60).padStart(2,"0")}`;
+}
+
+$("go").onclick = async () => {
+  $("go").disabled = true;
+  missedPolls = 0;
+  $("error").textContent = "";
+  $("resultCard").classList.add("hidden");
+  $("progressCard").classList.remove("hidden");
+  startedAt = Date.now(); tick(); timer = setInterval(tick, 1000);
+  showStage("uploading");
+  try {
+    const form = new FormData(); form.append("file", file);
+    const r = await fetch("/jobs", { method: "POST", body: form });
+    const job = await r.json();
+    if (!r.ok) throw new Error(job.detail || "Upload failed");
+    poll(job.job_id);
+  } catch (e) { fail(e.message); }
+};
+
+let missedPolls = 0;
+async function poll(id) {
+  let r;
+  try {
+    r = await fetch(`/jobs/${id}`);
+  } catch (e) {
+    // Server didn't answer at all: it crashed or run.py was stopped.
+    missedPolls++;
+    if (missedPolls >= 3) {
+      $("error").textContent = "Can't reach the server. Check the terminal where run.py is running " +
+        "for an error; if it stopped, start it again. Still retrying…";
+    }
+    return setTimeout(() => poll(id), 3000);
+  }
+  if (missedPolls) { missedPolls = 0; $("error").textContent = ""; }
+
+  if (r.status === 404) {
+    // Jobs live in memory, so a server restart forgets them.
+    return fail("the server restarted and lost this job. Please split the song again.");
+  }
+  if (!r.ok) {
+    $("error").textContent = `Server error (${r.status}). Still retrying…`;
+    return setTimeout(() => poll(id), 3000);
+  }
+
+  const job = await r.json();
+  if (job.status === "failed") return fail(job.error);
+  if (job.status === "done") return finish(job);
+  showStage(job.status);
+  if (job.queue_position) $("elapsed").textContent += ` · position ${job.queue_position} in line`;
+  setTimeout(() => poll(id), 2000);
+}
+
+function fail(msg) {
+  clearInterval(timer);
+  $("error").textContent = "Something went wrong: " + msg;
+  document.querySelectorAll("#steps li.active").forEach(li => li.className = "");
+  updateButton();
+}
+
+function finish(job) {
+  clearInterval(timer);
+  showStage("done");
+  $("elapsed").textContent = `Finished in ${job.duration_seconds}s`;
+  $("stems").innerHTML = "";
+  for (const [name, url] of Object.entries(job.stem_urls)) {
+    const row = document.createElement("div");
+    row.className = "stem";
+    row.innerHTML = `<span></span><audio controls preload="none"></audio><a download>Download</a>`;
+    row.querySelector("span").textContent = name;
+    row.querySelector("audio").src = url;
+    row.querySelector("a").href = url;
+    $("stems").appendChild(row);
+  }
+  $("zip").href = job.download_url;
+  $("resultCard").classList.remove("hidden");
+}
+
+$("again").onclick = () => {
+  file = null; $("file").value = ""; $("fileName").textContent = "";
+  $("progressCard").classList.add("hidden"); $("resultCard").classList.add("hidden");
+  updateButton();
+};
+
+checkHealth();
+</script>
+</body>
+</html>
